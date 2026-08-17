@@ -1450,42 +1450,34 @@ async function updateExistingItems(supaUrl, key, dromItems, crmSnapshot, coverBu
 
 // ── Phase 6: Counter protection ───────────────────────────────────────────────
 
-async function protectCounter(supaUrl, key) {
-  const settingRows    = await supaGet(supaUrl, key, 'app_settings', 'select=value&key=eq.next_internal_number')
-  const counterBefore  = settingRows[0]?.value ?? '58100'
-  const currentCounter = parseInt(counterBefore, 10)
+// Счётчик внутренних номеров синк больше НЕ трогает — только читает.
+//
+// Что здесь было: protectCounter брал parseInt(internal_number) по ВСЕМУ каталогу,
+// находил максимум и, если тот оказывался не меньше счётчика, поднимал счётчик до
+// max + 1. Заложенное допущение «максимальный номер в каталоге = последний выданный»
+// для этого каталога неверно: номера приезжают с Дрома, где их пишет человек в
+// заголовке объявления, ничем не ограничен и запросто ставит шестизначное. За 4–9
+// июля 2026 это подняло next_internal_number с 58107 до 558145 при рабочем диапазоне
+// 58000–62000, после чего выдавать номера из счётчика стало нельзя.
+//
+// Решение владельца (17.08.2026): счётчик ведётся от старшего номера, введённого
+// людьми ПРИ ЗАВЕДЕНИИ ПАРТИЙ, и из каталога не выводится вовсе. Номера, пришедшие
+// с Дрома, на него не влияют — это чужой человеческий ввод, а не идентификатор.
+//
+// Значение по-прежнему читаем и возвращаем как counter_before/counter_after, чтобы
+// колонки в drom_sync_runs продолжали заполняться и история прогонов не оборвалась.
+// В app_settings не пишем ничего.
+//
+// Постраничный обход каталога убран вместе с расчётом максимума: он существовал
+// только ради поднятия счётчика и стоил пять лишних запросов на каждый прогон.
+async function readCounter(supaUrl, key) {
+  const settingRows   = await supaGet(supaUrl, key, 'app_settings', 'select=value&key=eq.next_internal_number')
+  const counterBefore = settingRows[0]?.value ?? '58100'
 
-  const PAGE  = 1000
-  let   maxNum = 0
-  let   offset = 0
+  console.log('\n✅ СЧЁТЧИК: синк его не изменяет')
+  vlog(`   next_internal_number = ${counterBefore}`)
 
-  for (;;) {
-    const rows = await supaGet(supaUrl, key, 'inventory_items', `select=internal_number&limit=${PAGE}&offset=${offset}`)
-    if (!rows.length) break
-    for (const r of rows) {
-      const n = parseInt(r.internal_number, 10)
-      if (!isNaN(n) && n > maxNum) maxNum = n
-    }
-    if (rows.length < PAGE) break
-    offset += PAGE
-  }
-
-  let counterAfter = counterBefore
-  if (maxNum >= currentCounter) {
-    counterAfter = String(maxNum + 1)
-    console.log('\n⚠️  СЧЁТЧИК: next_internal_number обновлён')
-    vlog(`   ${counterBefore} → ${counterAfter} (MAX в БД: ${maxNum})`)
-    if (!DRY_RUN) {
-      await supaPatch(supaUrl, key, 'app_settings', 'key=eq.next_internal_number', { value: counterAfter })
-    } else {
-      console.log('   (DRY RUN — PATCH пропущен)')
-    }
-  } else {
-    console.log('\n✅ СЧЁТЧИК: без изменений')
-    vlog(`   next=${counterBefore}, MAX в БД=${maxNum}`)
-  }
-
-  return { counterBefore, counterAfter }
+  return { counterBefore, counterAfter: counterBefore }
 }
 
 // ── Phase 7: Detect mismatches (DB query against cycleStart) ──────────────────
@@ -2103,9 +2095,9 @@ async function main() {
     }
   }
 
-  // Phase 6: protect counter
-  console.log('\n🔢 Проверка счётчика internal_number...')
-  const { counterBefore, counterAfter } = await protectCounter(supaUrl, key)
+  // Phase 6: чтение счётчика для журнала прогона (синк его не меняет)
+  console.log('\n🔢 Чтение счётчика internal_number...')
+  const { counterBefore, counterAfter } = await readCounter(supaUrl, key)
 
   // Phase 7: detect mismatches — only when full cycle completed
   let mismatchesMissing = 0
