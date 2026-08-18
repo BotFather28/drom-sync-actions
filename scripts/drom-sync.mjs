@@ -1021,7 +1021,7 @@ async function importNewItems(supaUrl, key, newItems, crmSnapshot) {
     const pendingRows = await supaGet(
       supaUrl, key,
       'pending_purchases',
-      'select=id,internal_number,purchase_price,shipment_id,chassis_code,side,receipt_status&resolved_at=is.null'
+      'select=id,internal_number,purchase_price,shipment_id,chassis_code,side,receipt_status,quantity&resolved_at=is.null'
     )
     for (const r of pendingRows) {
       if (!pendingMap.has(r.internal_number)) {
@@ -1036,6 +1036,11 @@ async function importNewItems(supaUrl, key, newItems, crmSnapshot) {
   }
 
   const resolvedPendingIds = []
+  // Строки ожидания на несколько единиц: карточка создаётся сразу накопительной (поля ниже),
+  // но слой закупки POST'ом не создать — он в другой таблице и ему нужен id новой карточки,
+  // а `return=minimal` ничего не возвращает. Поэтому копим заготовки и раскладываем слои
+  // отдельным проходом после вставки.
+  const recurringSeeds = []
 
   for (let i = 0; i < newItems.length; i += BATCH) {
     const batch = newItems.slice(i, i + BATCH).map(item => {
@@ -1056,6 +1061,12 @@ async function importNewItems(supaUrl, key, newItems, crmSnapshot) {
         // Позиция синка рождается сразу в on_drom, минуя приёмку (единственный путь,
         // где in_stock_since проставлялся) — момент появления на Дроме и есть «в наличии».
         in_stock_since:  new Date().toISOString(),
+        // Те же значения, что стоят умолчаниями в схеме, — то есть для обычной позиции
+        // ничего не меняется. Перечислены явно, потому что PostgREST (PGRST102) требует
+        // одинаковый набор ключей у всех объектов пачки, а накопительной они нужны.
+        is_recurring:       false,
+        quantity:           1,
+        remaining_quantity: 1,
       }
 
       // Merge из pending_purchases: Дром авторитетен для name/side (парсинг),
@@ -1074,6 +1085,21 @@ async function importNewItems(supaUrl, key, newItems, crmSnapshot) {
         if (pending.receipt_status === 'written_off') {
           row.status = 'written_off'
           row.notes  = '[Списано при приёмке партии]'
+        }
+        // Закупка на несколько единиц — позиция сразу накопительная под ОДНИМ номером.
+        // Тот же расклад, что делает материализация строки ожидания
+        // (_materialize_pending_compute, миграция 20260819060000).
+        const pendingQty = Math.max(1, Number(pending.quantity) || 1)
+        if (pendingQty > 1) {
+          row.is_recurring       = true
+          row.quantity           = pendingQty
+          row.remaining_quantity = pendingQty
+          recurringSeeds.push({
+            internal_number: item.internalNumber,
+            quantity:        pendingQty,
+            unit_price:      pending.purchase_price,
+            shipment_id:     pending.shipment_id,
+          })
         }
         resolvedPendingIds.push(pending.id)
         pendingResolved++
@@ -1106,6 +1132,58 @@ async function importNewItems(supaUrl, key, newItems, crmSnapshot) {
       const pendingInBatch = batch.filter(r => r.purchase_price !== null).length
       console.log(`  (DRY RUN) Batch ${Math.floor(i / BATCH) + 1}: ${batch.length} новых, из них с pending: ${pendingInBatch}`)
     }
+  }
+
+  // ── Слои закупки для накопительных позиций ──────────────────────────────────
+  // Без слоя накопительная позиция знает количество, но не знает ни цены, ни партии:
+  // себестоимость продажи списывается ИЗ СЛОЯ (create_sale), а маржа партии считает
+  // накопительные только по слоям (margin.ts). Карточка без слоя ушла бы в продажу с
+  // нулевой себестоимостью, поэтому проход обязателен, а не косметический.
+  if (!DRY_RUN && recurringSeeds.length > 0) {
+    try {
+      const inList = recurringSeeds.map(s => `"${s.internal_number}"`).join(',')
+      const created = await supaGet(supaUrl, key, 'inventory_items',
+        `select=id,internal_number,is_recurring&internal_number=in.(${inList})`)
+      const byNumber = new Map(created.map(r => [r.internal_number, r]))
+
+      // Уже существующие слои: вставка идёт с resolution=ignore-duplicates, значит карточка
+      // под этим номером могла существовать до прогона (или прогон повторяется после сбоя).
+      // Класть второй слой на те же единицы нельзя — количество разъедется со складом.
+      const ids = created.map(r => r.id)
+      const withLayers = new Set()
+      if (ids.length > 0) {
+        const existing = await supaGet(supaUrl, key, 'inventory_stock_layers',
+          `select=item_id&item_id=in.(${ids.join(',')})`)
+        for (const l of existing) withLayers.add(l.item_id)
+      }
+
+      const layers = []
+      for (const seed of recurringSeeds) {
+        const item = byNumber.get(seed.internal_number)
+        // Не накопительная — значит карточку создали не мы (существовала раньше), трогать
+        // её нельзя: количество на складе уже чьё-то, слой бы его удвоил.
+        if (!item || !item.is_recurring || withLayers.has(item.id)) continue
+        layers.push({
+          item_id:            item.id,
+          shipment_id:        seed.shipment_id,
+          quantity:           seed.quantity,
+          remaining_quantity: seed.quantity,
+          unit_price:         seed.unit_price,
+        })
+      }
+
+      if (layers.length > 0) {
+        await supaPost(supaUrl, key, 'inventory_stock_layers', layers, 'return=minimal')
+        console.log(`  ✓ Накопительных позиций со слоем закупки: ${layers.length}`)
+      }
+      if (layers.length < recurringSeeds.length) {
+        console.warn(`  ⚠️  Слой не создан для ${recurringSeeds.length - layers.length} позиций (карточка не наша или слой уже был)`)
+      }
+    } catch (e) {
+      console.warn(`  ⚠️  Не удалось создать слои накопительных: ${e.message}`)
+    }
+  } else if (DRY_RUN && recurringSeeds.length > 0) {
+    console.log(`  (DRY RUN) Накопительных к созданию: ${recurringSeeds.length}`)
   }
 
   // Отметить разрешённые pending_purchases
