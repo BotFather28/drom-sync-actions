@@ -1021,7 +1021,7 @@ async function importNewItems(supaUrl, key, newItems, crmSnapshot) {
     const pendingRows = await supaGet(
       supaUrl, key,
       'pending_purchases',
-      'select=id,internal_number,purchase_price,shipment_id,chassis_code,side,receipt_status,quantity&resolved_at=is.null'
+      'select=id,internal_number,purchase_price,shipment_id,chassis_code,side,receipt_status,quantity,received_quantity&resolved_at=is.null'
     )
     for (const r of pendingRows) {
       if (!pendingMap.has(r.internal_number)) {
@@ -1089,7 +1089,16 @@ async function importNewItems(supaUrl, key, newItems, crmSnapshot) {
         // Закупка на несколько единиц — позиция сразу накопительная под ОДНИМ номером.
         // Тот же расклад, что делает материализация строки ожидания
         // (_materialize_pending_compute, миграция 20260819060000).
-        const pendingQty = Math.max(1, Number(pending.quantity) || 1)
+        //
+        // Единиц кладём ПРИНЯТОЕ количество, а не заказанное: приёмка могла пройти раньше,
+        // чем позиция появилась на Дроме, и брак на склад попадать не должен. Решения нет
+        // (received_quantity = null) — кладём заказанное, как и было. Ноль принятых даёт
+        // pendingQty = 0: накопительной позиция не станет, а статус written_off поставит
+        // ветка receipt_status выше.
+        const orderedQty = Math.max(1, Number(pending.quantity) || 1)
+        const pendingQty = pending.received_quantity == null
+          ? orderedQty
+          : Math.max(0, Number(pending.received_quantity) || 0)
         if (pendingQty > 1) {
           row.is_recurring       = true
           row.quantity           = pendingQty
