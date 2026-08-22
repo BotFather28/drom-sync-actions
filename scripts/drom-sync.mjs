@@ -1425,21 +1425,9 @@ async function updateExistingItems(supaUrl, key, dromItems, crmSnapshot, coverBu
       await supaPatch(supaUrl, key, 'inventory_items', `id=eq.${id}`, { side: newSide })
     }
 
-    // Перевод in_stock/processing → on_drom (сам статус + снятие метки «ждёт выставления»)
-    //
-    // returned_to_sale_at — отметка «позицию вернули в продажу, объявление надо выставить
-    // заново» (её ставит RPC return_item_to_sale). Объявление найдено — задача выполнена.
-    //
-    // ⚠️ ИСТОЧНИК ПРАВДЫ — ТРИГГЕР В БАЗЕ, А НЕ ЭТА СТРОКА. Триггер
-    // inventory_clear_returned_to_sale (BEFORE UPDATE OF status, миграция
-    // 20260822100000) обнуляет поле при ЛЮБОМ переходе в on_drom, кем бы он ни был
-    // сделан: этим синком, RPC или рукой в Studio. Здесь — явная подстраховка, чтобы
-    // код синка не полагался на невидимый из него побочный эффект. Присваивание
-    // избыточно и обязано таким остаться: если оно когда-нибудь начнёт что-то менять,
-    // значит триггер потерян — это повод чинить базу, а не полагаться на синк.
+    // Перевод in_stock/processing → on_drom (только сам статус)
     for (const { id } of statusUpdates) {
-      await supaPatch(supaUrl, key, 'inventory_items', `id=eq.${id}`,
-        { status: 'on_drom', returned_to_sale_at: null })
+      await supaPatch(supaUrl, key, 'inventory_items', `id=eq.${id}`, { status: 'on_drom' })
     }
 
     // Заполнить/обновить drom_url (только это поле)
