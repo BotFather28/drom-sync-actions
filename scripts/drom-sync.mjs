@@ -1897,13 +1897,19 @@ async function clearCycleListings(supaUrl, key) {
 // сдвига пагинации.
 async function detectCollisionsFromCycle(supaUrl, key, crmSnapshot) {
   // 1. Выгрузить накопитель постранично.
+  // Шаг — по числу реально пришедших строк, останов — на пустой странице, а НЕ на
+  // «пришло меньше PAGE». Иначе цикл зависит от серверного PGRST_DB_MAX_ROWS: при потолке
+  // ниже PAGE первая страница выглядела бы последней (молчаливая обрезка), а шаг по PAGE
+  // пропускал бы строки между потолком и PAGE. Сортировка по id обязательна — без неё
+  // порядок строк физический и страницы могут перекрыться или разойтись.
   const PAGE = 1000
   const all = []
-  for (let offset = 0; ; offset += PAGE) {
+  for (let offset = 0; ; ) {
     const rows = await supaGet(supaUrl, key, 'drom_cycle_listings',
-      `select=internal_number,title,url,price,page&limit=${PAGE}&offset=${offset}`)
+      `select=internal_number,title,url,price,page&order=id&limit=${PAGE}&offset=${offset}`)
     all.push(...rows)
-    if (rows.length < PAGE) break
+    if (rows.length === 0) break
+    offset += rows.length
   }
 
   // 2. Группировка по номеру; дубль = >1 РАЗНЫХ url.
