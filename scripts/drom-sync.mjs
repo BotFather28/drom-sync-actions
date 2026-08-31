@@ -84,6 +84,21 @@ const AUTO_MOVE_STREAK        = 3      // сколько полных круго
 const AUTO_MOVE_MAX_MISS_FRAC = 0.10   // предохранитель: если за круг не увидено > 10% каталога —
                                        // вероятен сбой парсинга, перевод не выполняем, только лог
 
+// ── Сколько идентификаторов класть в один in.(…) ─────────────────────────────
+// UUID в строке запроса занимает 37 символов вместе с запятой, а URI рвётся примерно на 8 КБ:
+// PostgREST отвечает 414 «URI too long», и это НЕ мягкий отказ — supaPatch бросает, прогон
+// падает целиком. Ровно так синк и падал каждые 15 минут с 26.08.2026 по 31.08.2026: на
+// завершении круга bumpMissStreak пыталась пропатчить 223 позиции одним запросом (~8,2 КБ)
+// пачками по 500. Пять суток ни один прогон не доходил до конца круга — не инкрементился
+// drom_miss_streak, не ставился missing_from_drom, не искались коллизии номеров и
+// sold_but_listed, не работал автоперевод.
+//
+// 150 — это ~5,6 КБ, с запасом под базовый URL и остальные параметры. Константа общая:
+// пачка подбирается под ДЛИНУ URI, а не под удобное круглое число, и всякий новый in.()
+// с идентификаторами должен брать её, а не заводить своё значение.
+// Списки номеров (internal_number, ~6 символов) под это ограничение не подпадают.
+const ID_IN_BATCH = 150
+
 // ── Backoff при бане Дрома (состояние в app_settings, переживает рестарты) ────
 // Таймер круглосуточный (каждые 15 мин). Чтобы при 403/бане не долбиться 96 раз
 // в сутки и не продлевать бан, после отказа пропускаем N ближайших прогонов:
@@ -1160,9 +1175,10 @@ async function importNewItems(supaUrl, key, newItems, crmSnapshot) {
       // Класть второй слой на те же единицы нельзя — количество разъедется со складом.
       const ids = created.map(r => r.id)
       const withLayers = new Set()
-      if (ids.length > 0) {
+      // Порциями по той же причине, что и всюду: список id уходит в строку запроса.
+      for (let i = 0; i < ids.length; i += ID_IN_BATCH) {
         const existing = await supaGet(supaUrl, key, 'inventory_stock_layers',
-          `select=item_id&item_id=in.(${ids.join(',')})`)
+          `select=item_id&item_id=in.(${ids.slice(i, i + ID_IN_BATCH).join(',')})`)
         for (const l of existing) withLayers.add(l.item_id)
       }
 
@@ -1375,7 +1391,7 @@ async function updateExistingItems(supaUrl, key, dromItems, crmSnapshot, coverBu
 
   if (!DRY_RUN) {
     const now   = new Date().toISOString()
-    const BATCH = 500
+    const BATCH = ID_IN_BATCH   // идентификаторы уходят в in.(…) — размер держит URI
 
     // Пункт 1/3: last_seen_at + сброс drom_miss_streak по id всех увиденных в блоке позиций
     // (по id, а не по номеру — так отметку получают и сматченные по url при несовпадении номера).
@@ -1748,7 +1764,7 @@ async function bumpMissStreak(supaUrl, key, cycleStart, itemsCount) {
   }
 
   // PostgREST не умеет x = x + 1 → группируем по текущему значению и патчим пачками.
-  const BATCH = 500
+  const BATCH = ID_IN_BATCH   // идентификаторы уходят в in.(…) — размер держит URI
   const byStreak = new Map()
   for (const r of notSeen) {
     const s = r.drom_miss_streak ?? 0
@@ -1778,7 +1794,7 @@ async function autoMoveStaleItems(supaUrl, key) {
   if (toMove.length === 0) return { moved: 0 }
 
   const now   = new Date().toISOString()
-  const BATCH = 500
+  const BATCH = ID_IN_BATCH   // идентификаторы уходят в in.(…) — размер держит URI
   for (let i = 0; i < toMove.length; i += BATCH) {
     const slice  = toMove.slice(i, i + BATCH)
     const inList = slice.join(',')
