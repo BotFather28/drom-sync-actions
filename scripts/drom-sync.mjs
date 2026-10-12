@@ -978,12 +978,15 @@ async function loadCrmSnapshot(supaUrl, key) {
   let   offset   = 0
   let   page     = 1
 
+  // ⚠️ order=id обязателен: каталог больше 1000 позиций (6027 на 13.10.2026), а постраничное чтение
+  // без ORDER BY не гарантирует порядок — позиция могла выпасть из снимка или попасть в него дважды
+  // (полное ревью 13.10.2026; правило проекта — docs/ARCHITECTURE_MAP.md, «Потолок строк PostgREST»).
   for (;;) {
     vlog(`  CRM страница ${page}: offset=${offset}`)
     const rows = await supaGet(
       supaUrl, key,
       'inventory_items',
-      `select=id,internal_number,name,selling_price,status,last_seen_at,side,drom_url,drom_photo_id&limit=${PAGE}&offset=${offset}`
+      `select=id,internal_number,name,selling_price,status,last_seen_at,side,drom_url,drom_photo_id&order=id&limit=${PAGE}&offset=${offset}`
     )
     vlog(`    → получено: ${rows.length}`)
     if (!rows.length) break
