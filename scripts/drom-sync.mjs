@@ -632,6 +632,14 @@ const NUM_RE      = /\(([A-Za-zА-Яа-я0-9]+(?:\/\d+)?)\)?\s*$/
 // Fallback: bare numeric token (optionally /N) preceded by whitespace at end of title.
 const BARE_NUM_RE = /\s(\d+(?:\/\d+)?)\s*$/
 
+// Номер с буквой набирают то русской, то латинской раскладкой («2002К» в закупке, «2002K» на
+// Дроме). Ключ сравнения: без пробелов, верхний регистр, одинаковые по виду буквы — латиницей.
+// Копия canonNumber из src/lib/utils/number-lookalike.ts (сюда TS не импортировать) — менять вместе.
+const CYR_TO_LAT = { А: 'A', В: 'B', Е: 'E', К: 'K', М: 'M', Н: 'H', О: 'O', Р: 'P', С: 'C', Т: 'T', У: 'Y', Х: 'X' }
+function canonNumber(n) {
+  return String(n ?? '').replace(/\s+/g, '').toUpperCase().replace(/[АВЕКМНОРСТУХ]/g, ch => CYR_TO_LAT[ch] ?? ch)
+}
+
 function extractInternalNumber(title) {
   const m = NUM_RE.exec(title)
   if (m) return m[1]
@@ -1041,9 +1049,11 @@ async function importNewItems(supaUrl, key, newItems, crmSnapshot) {
       'pending_purchases',
       'select=id,internal_number,purchase_price,shipment_id,chassis_code,side,receipt_status,quantity,received_quantity&resolved_at=is.null'
     )
+    // Ключ — canonNumber: «2002К» в закупке и «2002K» на Дроме — одна позиция.
     for (const r of pendingRows) {
-      if (!pendingMap.has(r.internal_number)) {
-        pendingMap.set(r.internal_number, r)
+      const k = canonNumber(r.internal_number)
+      if (!pendingMap.has(k)) {
+        pendingMap.set(k, r)
       }
     }
     if (pendingMap.size > 0) {
@@ -1089,7 +1099,7 @@ async function importNewItems(supaUrl, key, newItems, crmSnapshot) {
 
       // Merge из pending_purchases: Дром авторитетен для name/side (парсинг),
       // pending авторитетен для purchase_price/shipment_id/chassis_code
-      const pending = pendingMap.get(item.internalNumber)
+      const pending = pendingMap.get(canonNumber(item.internalNumber))
       if (pending) {
         row.purchase_price = pending.purchase_price
         row.shipment_id    = pending.shipment_id
