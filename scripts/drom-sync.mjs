@@ -999,7 +999,9 @@ async function loadCrmSnapshot(supaUrl, key) {
     vlog(`    → получено: ${rows.length}`)
     if (!rows.length) break
     for (const r of rows) {
-      snapshot.set(r.internal_number, {
+      // Ключ — canonNumber: карточка «2000К» (кириллица, завели из закупки) и объявление «2000K»
+      // (латиница) — одна позиция, иначе синк завёл бы дубль (25.11.2026).
+      snapshot.set(canonNumber(r.internal_number), {
         id:            r.id,
         name:          r.name,
         selling_price: r.selling_price,
@@ -1149,7 +1151,7 @@ async function importNewItems(supaUrl, key, newItems, crmSnapshot) {
       // Слэш-вариант (например 40242/1): найти базовую позицию в снапшоте
       if (item.internalNumber.includes('/')) {
         const baseNumber = item.internalNumber.split('/')[0]
-        const base = crmSnapshot.get(baseNumber)
+        const base = crmSnapshot.get(canonNumber(baseNumber))
         if (base) {
           row.slash_base_id = base.id
           slashLinked++
@@ -1290,7 +1292,7 @@ async function updateExistingItems(supaUrl, key, dromItems, crmSnapshot, coverBu
     // Пункт 1: сначала матч по номеру; если номер в фиде не совпал (напр. «59431П», слэш-варианты)
     // — fallback по drom_url. Та же позиция, отметку «виден» ставим ей, дубль не создаём
     // (onPageComplete исключает url-совпадения из newPageItems).
-    let crm = crmSnapshot.get(dromItem.internalNumber)
+    let crm = crmSnapshot.get(canonNumber(dromItem.internalNumber))
     if (!crm && dromItem.url) crm = crmByUrl.get(dromItem.url)
     if (!crm) continue   // new item, handled by importNewItems
 
@@ -1952,7 +1954,7 @@ async function detectCollisionsFromCycle(supaUrl, key, crmSnapshot) {
     if (byUrl.size < 2) continue
     const listings = [...byUrl.values()].sort((a, b) => (a.page ?? 0) - (b.page ?? 0))
     const a = listings[0], b = listings[1]
-    const crmUrl = crmSnapshot.get(num)?.drom_url ?? null
+    const crmUrl = crmSnapshot.get(canonNumber(num))?.drom_url ?? null
     const in_crm = crmUrl && crmUrl === a.url ? 'a' : crmUrl && crmUrl === b.url ? 'b' : 'none'
     collisions.push({ num, a, b, in_crm, extra: byUrl.size - 2 })
   }
@@ -2093,7 +2095,7 @@ async function main() {
     // «Новое» = нет ни по номеру, ни по url (пункт 1: url-совпадение — существующая позиция,
     // её обновит updateExistingItems, дубль importNewItems не создаёт).
     const newPageItems = pageItems.filter(item =>
-      !crmSnapshot.has(item.internalNumber) && !(item.url && crmByUrl.has(item.url)))
+      !crmSnapshot.has(canonNumber(item.internalNumber)) && !(item.url && crmByUrl.has(item.url)))
 
     if (newPageItems.length > 0) {
       if (!DRY_RUN) {
@@ -2103,7 +2105,7 @@ async function main() {
       } else {
         const slashLinkedDry = newPageItems.filter(i => {
           if (!i.internalNumber.includes('/')) return false
-          return crmSnapshot.has(i.internalNumber.split('/')[0])
+          return crmSnapshot.has(canonNumber(i.internalNumber.split('/')[0]))
         }).length
         console.log(
           `  (DRY RUN) Стр.${pg}: ${newPageItems.length} новых` +
